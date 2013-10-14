@@ -27,7 +27,7 @@ class _PushSomeData(Command):
 class _ToggleSendingData(Command):
     arguments = [
         ('id', String()),
-        ('continue', Boolean()),
+        ('keepGoing', Boolean()),
     ]
     response = []
 
@@ -67,6 +67,15 @@ class ProducerAMP(AMP):
         self._producers[id]._gotData(data, False)
         if done:
             self._producerDone(id)
+        return {}
+
+    @_ToggleSendingData.responder
+    def _dataStateToggled(self, id, keepGoing):
+        producer = self._producers[id]
+        if keepGoing:
+            producer.resumeProducing()
+        else:
+            producer.pauseProducing()
         return {}
 
     def _gotConsumerData(self, id, isPush, data):
@@ -112,6 +121,9 @@ class ProducerAMP(AMP):
     def _needProducerData(self, id):
         return self.callRemote(_RequestSomeData, id=id)
 
+    def _toggleSendingData(self, id, keepGoing):
+        return self.callRemote(_ToggleSendingData, id=id, keepGoing=keepGoing)
+
 
 @implementer(IConsumer)
 class _AMPConsumer(object):
@@ -139,14 +151,21 @@ class _AMPProducer(object):
         self._id = id
         self._proto = proto
         self._isPush = isPush
-        self._deferred = None
+        self._lock = defer.DeferredLock()
+
+    def pauseProducing(self):
+        if not self._isPush:
+            raise ValueError('only push producers can be paused')
+        d = self._lock.run(self._proto._toggleSendingData, self._id, keepGoing=False)
+        d.addErrback(log.err, 'error pausing production')
 
     def resumeProducing(self):
-        if self._deferred is not None:
-            return
-        self._deferred = d = self._proto._needProducerData(self._id)
-        d.addCallback(lambda d: self._gotData(**d))
-        d.addErrback(log.err, 'error pulling data')
+        if self._isPush:
+            d = self._lock.run(self._proto._toggleSendingData, self._id, keepGoing=True)
+        else:
+            d = self._lock.run(self._proto._needProducerData, self._id)
+            d.addCallback(lambda d: self._gotData(**d))
+        d.addErrback(log.err, 'error resuming production')
 
     def _gotData(self, data, more):
         self._deferred = None

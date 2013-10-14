@@ -1,6 +1,6 @@
 from StringIO import StringIO
 
-from twisted.internet.interfaces import IConsumer
+from twisted.internet.interfaces import IConsumer, IPushProducer
 from twisted.internet.task import Clock, Cooperator, LoopingCall
 from twisted.protocols.amp import Command
 from twisted.protocols.basic import FileSender
@@ -56,6 +56,20 @@ class FileConsumer(object):
 
     def value(self):
         return self._io.getvalue()
+
+
+@implementer(IPushProducer)
+class PausablePushProducer(object):
+    def __init__(self):
+        self.paused = False
+
+    def pauseProducing(self):
+        assert not self.paused
+        self.paused = True
+
+    def resumeProducing(self):
+        assert self.paused
+        self.paused = False
 
 
 fileData = 'spam eggs' * 10240
@@ -119,6 +133,27 @@ def test_pushProducer():
     assert len(consumer.value()) == len(fileData)
     assert consumer.value() == fileData
     assert consumer._producer is None
+
+
+def test_pausingPushProducer():
+    client = TestAMP()
+    server = TestAMP()
+    pump = returnConnected(server, client)
+    consumer = FileConsumer()
+    producer = PausablePushProducer()
+    def registerWithConsumer(consumer):
+        consumer.registerProducer(producer, True)
+        return producer
+    client.callRemote(SendProducer, producer=registerWithConsumer)
+    pump.flush()
+    server.producer.registerConsumer(consumer)
+    assert not producer.paused
+    server.producer.pauseProducing()
+    pump.flush()
+    assert producer.paused
+    server.producer.resumeProducing()
+    pump.flush()
+    assert not producer.paused
 
 
 # from twisted.trial import unittest
