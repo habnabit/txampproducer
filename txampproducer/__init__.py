@@ -37,6 +37,33 @@ class _ProducerDone(Command):
     response = []
 
 
+class Producer(Argument):
+    def __init__(self, optional=False, maxStringPartSize=8192):
+        Argument.__init__(self, optional)
+        self.maxStringPartSize = maxStringPartSize
+
+    def toStringProto(self, makeProducer, proto):
+        id = uuid.uuid4().bytes
+        consumer = _AMPConsumer(id, proto)
+        producer = makeProducer(consumer)
+        if consumer._isPush is None:
+            raise ValueError("makeProducer callable didn't register a producer")
+        proto._producers[id] = producer
+        proto._consumers[id] = consumer
+        return id + ('y' if consumer._isPush else 'n')
+
+    def fromStringProto(self, id, proto):
+        id, isPush = id[:-1], id[-1] == 'y'
+        producer = _AMPProducer(id, proto, isPush)
+        proto._producers[id] = producer
+        return producer
+
+
+class SendProducer(Command):
+    arguments = [('producer', Producer())]
+    response = []
+
+
 class ProducerAMP(AMP):
     def __init__(self, *a, **kw):
         AMP.__init__(self, *a, **kw)
@@ -180,25 +207,3 @@ class _AMPProducer(object):
     def unregisterConsumer(self):
         self._consumer.unregisterProducer()
         self._consumer = None
-
-
-class Producer(Argument):
-    def __init__(self, optional=False, maxStringPartSize=8192):
-        Argument.__init__(self, optional)
-        self.maxStringPartSize = maxStringPartSize
-
-    def toStringProto(self, makeProducer, proto):
-        id = uuid.uuid4().bytes
-        consumer = _AMPConsumer(id, proto)
-        producer = makeProducer(consumer)
-        if consumer._isPush is None:
-            raise ValueError("makeProducer callable didn't register a producer")
-        proto._producers[id] = producer
-        proto._consumers[id] = consumer
-        return id + ('y' if consumer._isPush else 'n')
-
-    def fromStringProto(self, id, proto):
-        id, isPush = id[:-1], id[-1] == 'y'
-        producer = _AMPProducer(id, proto, isPush)
-        proto._producers[id] = producer
-        return producer

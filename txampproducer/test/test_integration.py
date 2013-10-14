@@ -2,19 +2,13 @@ from StringIO import StringIO
 
 from twisted.internet.interfaces import IConsumer, IPushProducer
 from twisted.internet.task import Clock, Cooperator, LoopingCall
-from twisted.protocols.amp import Command
 from twisted.protocols.basic import FileSender
 from twisted.python import log
 from twisted.test.testutils import returnConnected
 from twisted.web.client import FileBodyProducer
 from zope.interface import implementer
 
-from txampproducer import ProducerAMP, Producer
-
-
-class SendProducer(Command):
-    arguments = [('producer', Producer())]
-    response = []
+from txampproducer import ProducerAMP, SendProducer
 
 
 class TestAMP(ProducerAMP):
