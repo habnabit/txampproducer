@@ -154,11 +154,3 @@ def test_pausingPushProducer():
     server.producer.resumeProducing()
     pump.flush()
     assert not producer.paused
-
-
-# from twisted.trial import unittest
-
-# class IntegrationTests(unittest.TestCase):
-#     test_pullFileConsumer = lambda self: test_pullFileConsumer()
-#     test_pullProducer = lambda self: test_pullProducer()
-#     test_pushProducer = lambda self: test_pushProducer()
