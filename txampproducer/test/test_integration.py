@@ -5,6 +5,7 @@ from twisted.internet.task import Clock, Cooperator, LoopingCall
 from twisted.protocols.basic import FileSender
 from twisted.python import log
 from twisted.test.testutils import returnConnected
+from twisted.trial import unittest
 from twisted.web.client import FileBodyProducer
 from zope.interface import implementer
 
@@ -70,126 +71,116 @@ class PausablePushProducer(object):
 fileData = 'spam eggs' * 10240
 
 
-def test_pullFileConsumer():
-    fileToSend = StringIO(fileData)
-    clock = Clock()
-    consumer = FileConsumer(clock)
-    d = FileSender().beginFileTransfer(fileToSend, consumer)
-    finished = []
-    d.addCallback(finished.append)
-    while not finished:
-        clock.advance(1)
-    assert consumer.value() == fileData
+class IntegrationTests(unittest.TestCase):
+    def test_pullFileConsumer(self):
+        fileToSend = StringIO(fileData)
+        clock = Clock()
+        consumer = FileConsumer(clock)
+        d = FileSender().beginFileTransfer(fileToSend, consumer)
+        finished = []
+        d.addCallback(finished.append)
+        while not finished:
+            clock.advance(1)
+        self.assertEqual(consumer.value(), fileData)
 
+    def test_pullProducer(self):
+        client = TestAMP()
+        server = TestAMP()
+        pump = returnConnected(server, client)
+        fileToSend = StringIO(fileData)
+        clock = Clock()
+        consumer = FileConsumer(clock)
+        def registerWithConsumer(consumer):
+            producer = FileSender()
+            producer.beginFileTransfer(fileToSend, consumer)
+            return producer
+        client.callRemote(SendProducer, producer=registerWithConsumer)
+        pump.pump()
+        server.producer.registerConsumer(consumer)
+        while True:
+            clock.advance(1)
+            if not pump.pump():
+                break
+        self.assertEqual(consumer.value(), fileData)
+        self.assertIdentical(consumer._producer, None)
 
-def test_pullProducer():
-    client = TestAMP()
-    server = TestAMP()
-    pump = returnConnected(server, client)
-    fileToSend = StringIO(fileData)
-    clock = Clock()
-    consumer = FileConsumer(clock)
-    def registerWithConsumer(consumer):
-        producer = FileSender()
-        producer.beginFileTransfer(fileToSend, consumer)
-        return producer
-    client.callRemote(SendProducer, producer=registerWithConsumer)
-    pump.pump()
-    server.producer.registerConsumer(consumer)
-    while True:
-        clock.advance(1)
-        if not pump.pump():
-            break
-    assert consumer.value() == fileData
-    assert consumer._producer is None
+    def test_pushProducer(self):
+        client = TestAMP()
+        server = TestAMP()
+        pump = returnConnected(server, client)
+        fileToSend = StringIO(fileData)
+        consumer = FileConsumer()
+        clock = Clock()
+        cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+        def registerWithConsumer(consumer):
+            producer = FileBodyProducer(fileToSend, cooperator=cooperator)
+            d = producer.startProducing(consumer)
+            d.addCallback(lambda ign: consumer.unregisterProducer())
+            d.addErrback(log.err, 'error producing file body')
+            consumer.registerProducer(producer, True)
+            return producer
+        client.callRemote(SendProducer, producer=registerWithConsumer)
+        pump.pump()
+        server.producer.registerConsumer(consumer)
 
+        while pump.pump():
+            clock.advance(1)
+        self.assertEqual(consumer.value(), fileData)
+        self.assertIdentical(consumer._producer, None)
 
-def test_pushProducer():
-    client = TestAMP()
-    server = TestAMP()
-    pump = returnConnected(server, client)
-    fileToSend = StringIO(fileData)
-    consumer = FileConsumer()
-    clock = Clock()
-    cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
-    def registerWithConsumer(consumer):
-        producer = FileBodyProducer(fileToSend, cooperator=cooperator)
-        d = producer.startProducing(consumer)
-        d.addCallback(lambda ign: consumer.unregisterProducer())
-        d.addErrback(log.err, 'error producing file body')
-        consumer.registerProducer(producer, True)
-        return producer
-    client.callRemote(SendProducer, producer=registerWithConsumer)
-    pump.pump()
-    server.producer.registerConsumer(consumer)
+    def test_pausingPushProducer(self):
+        client = TestAMP()
+        server = TestAMP()
+        pump = returnConnected(server, client)
+        consumer = FileConsumer()
+        producer = PausablePushProducer()
+        def registerWithConsumer(consumer):
+            consumer.registerProducer(producer, True)
+            return producer
+        client.callRemote(SendProducer, producer=registerWithConsumer)
+        pump.flush()
+        server.producer.registerConsumer(consumer)
+        self.assertFalse(producer.paused)
+        server.producer.pauseProducing()
+        pump.flush()
+        self.assertTrue(producer.paused)
+        server.producer.resumeProducing()
+        pump.flush()
+        self.assertFalse(producer.paused)
 
-    while pump.pump():
-        clock.advance(1)
-    assert len(consumer.value()) == len(fileData)
-    assert consumer.value() == fileData
-    assert consumer._producer is None
+    def test_deliverContent(self):
+        client = TestAMP()
+        server = TestAMP()
+        pump = returnConnected(server, client)
+        fileToSend = StringIO(fileData)
+        clock = Clock()
+        cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+        def registerWithConsumer(consumer):
+            producer = FileBodyProducer(fileToSend, cooperator=cooperator)
+            d = producer.startProducing(consumer)
+            d.addCallback(lambda ign: consumer.unregisterProducer())
+            d.addErrback(log.err, 'error producing file body')
+            consumer.registerProducer(producer, True)
+            return producer
+        client.callRemote(SendProducer, producer=registerWithConsumer)
+        pump.pump()
+        d = deliverContent(server.producer)
 
+        while pump.pump():
+            clock.advance(1)
+        self.assertEqual(self.successResultOf(d), fileData)
 
-def test_pausingPushProducer():
-    client = TestAMP()
-    server = TestAMP()
-    pump = returnConnected(server, client)
-    consumer = FileConsumer()
-    producer = PausablePushProducer()
-    def registerWithConsumer(consumer):
-        consumer.registerProducer(producer, True)
-        return producer
-    client.callRemote(SendProducer, producer=registerWithConsumer)
-    pump.flush()
-    server.producer.registerConsumer(consumer)
-    assert not producer.paused
-    server.producer.pauseProducing()
-    pump.flush()
-    assert producer.paused
-    server.producer.resumeProducing()
-    pump.flush()
-    assert not producer.paused
+    def test_sendFile(self):
+        client = TestAMP()
+        server = TestAMP()
+        pump = returnConnected(server, client)
+        fileToSend = StringIO(fileData)
+        clock = Clock()
+        cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+        client.sendFile(fileToSend, cooperator=cooperator)
+        pump.pump()
+        d = deliverContent(server.producer)
 
-
-def test_deliverContent():
-    client = TestAMP()
-    server = TestAMP()
-    pump = returnConnected(server, client)
-    fileToSend = StringIO(fileData)
-    clock = Clock()
-    cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
-    def registerWithConsumer(consumer):
-        producer = FileBodyProducer(fileToSend, cooperator=cooperator)
-        d = producer.startProducing(consumer)
-        d.addCallback(lambda ign: consumer.unregisterProducer())
-        d.addErrback(log.err, 'error producing file body')
-        consumer.registerProducer(producer, True)
-        return producer
-    client.callRemote(SendProducer, producer=registerWithConsumer)
-    pump.pump()
-    d = deliverContent(server.producer)
-    body = []
-    d.addCallback(body.append)
-
-    while pump.pump():
-        clock.advance(1)
-    assert len(body[0]) == len(fileData)
-    assert body[0] == fileData
-
-def test_sendFile():
-    client = TestAMP()
-    server = TestAMP()
-    pump = returnConnected(server, client)
-    fileToSend = StringIO(fileData)
-    clock = Clock()
-    cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
-    client.sendFile(fileToSend, cooperator=cooperator)
-    pump.pump()
-    d = deliverContent(server.producer)
-    body = []
-    d.addCallback(body.append)
-
-    while pump.pump():
-        clock.advance(1)
-    assert len(body[0]) == len(fileData)
-    assert body[0] == fileData
+        while pump.pump():
+            clock.advance(1)
+        self.assertEqual(self.successResultOf(d), fileData)
