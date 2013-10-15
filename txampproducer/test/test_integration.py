@@ -13,8 +13,9 @@ from txampproducer import ProducerAMP, SendProducer, deliverContent
 
 class TestAMP(ProducerAMP):
     @SendProducer.responder
-    def receiveProducer(self, producer):
+    def receiveProducer(self, producer, name=None):
         self.producer = producer
+        self.fileName = name
         return {}
 
 
@@ -165,6 +166,24 @@ def test_deliverContent():
         consumer.registerProducer(producer, True)
         return producer
     client.callRemote(SendProducer, producer=registerWithConsumer)
+    pump.pump()
+    d = deliverContent(server.producer)
+    body = []
+    d.addCallback(body.append)
+
+    while pump.pump():
+        clock.advance(1)
+    assert len(body[0]) == len(fileData)
+    assert body[0] == fileData
+
+def test_sendFile():
+    client = TestAMP()
+    server = TestAMP()
+    pump = returnConnected(server, client)
+    fileToSend = StringIO(fileData)
+    clock = Clock()
+    cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+    client.sendFile(fileToSend, cooperator=cooperator)
     pump.pump()
     d = deliverContent(server.producer)
     body = []

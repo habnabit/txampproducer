@@ -4,6 +4,7 @@ from twisted.internet.interfaces import IConsumer, IProducer, IPushProducer, IPu
 from twisted.internet import defer, protocol
 from twisted.protocols.amp import AMP, Argument, Boolean, Command, String
 from twisted.python import failure, log
+from twisted.web.client import FileBodyProducer
 from zope.interface import directlyProvides, implementer, Interface
 
 
@@ -60,7 +61,10 @@ class Producer(Argument):
 
 
 class SendProducer(Command):
-    arguments = [('producer', Producer())]
+    arguments = [
+        ('name', String(optional=True)),
+        ('producer', Producer()),
+    ]
     response = []
 
 
@@ -150,6 +154,19 @@ class ProducerAMP(AMP):
 
     def _toggleSendingData(self, id, keepGoing):
         return self.callRemote(_ToggleSendingData, id=id, keepGoing=keepGoing)
+
+    def sendFile(self, fobj, name=None, cooperator=None):
+        kw = {}
+        if cooperator is not None:
+            kw['cooperator'] = cooperator
+        def registerWithConsumer(consumer):
+            producer = FileBodyProducer(fobj, **kw)
+            d = producer.startProducing(consumer)
+            d.addCallback(lambda ign: consumer.unregisterProducer())
+            d.addErrback(log.err, 'error producing file body')
+            consumer.registerProducer(producer, True)
+            return producer
+        self.callRemote(SendProducer, producer=registerWithConsumer, name=name)
 
 
 @implementer(IConsumer)
