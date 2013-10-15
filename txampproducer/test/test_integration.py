@@ -3,7 +3,7 @@ from StringIO import StringIO
 from twisted.internet.interfaces import IConsumer, IPushProducer
 from twisted.internet.task import Clock, Cooperator, LoopingCall
 from twisted.protocols.basic import FileSender
-from twisted.python import log
+from twisted.python import failure, log
 from twisted.test.testutils import returnConnected
 from twisted.trial import unittest
 from twisted.web.client import FileBodyProducer
@@ -66,6 +66,10 @@ class PausablePushProducer(object):
     def resumeProducing(self):
         assert self.paused
         self.paused = False
+
+
+class FakeDisconnectedError(Exception):
+    pass
 
 
 fileData = 'spam eggs' * 10240
@@ -175,3 +179,15 @@ class ProducerAMPIntegrationTests(unittest.TestCase):
         while self.pump.pump():
             clock.advance(1)
         self.assertEqual(self.successResultOf(d), fileData)
+
+    def test_sendFileDisconnection(self):
+        fileToSend = StringIO(fileData)
+        clock = Clock()
+        cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+        self.client.sendFile(fileToSend, cooperator=cooperator)
+        self.pump.pump()
+        d = deliverContent(self.server.producer)
+        self.pump.pump()
+        clock.advance(1)
+        self.server.connectionLost(failure.Failure(FakeDisconnectedError()))
+        self.failureResultOf(d, FakeDisconnectedError)

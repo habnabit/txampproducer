@@ -168,6 +168,14 @@ class ProducerAMP(AMP):
             return producer
         self.callRemote(SendProducer, producer=registerWithConsumer, name=name)
 
+    def connectionLost(self, reason):
+        consumers, producers = self._consumers, self._producers
+        self._consumers = self._producers = None
+        for id, producer in producers.iteritems():
+            consumer = consumers.get(id)
+            if consumer is None:
+                producer._connectionLost(reason)
+
 
 @implementer(IConsumer)
 class _AMPConsumer(object):
@@ -206,6 +214,7 @@ class _AMPProducer(object):
             directlyProvides(self, IPushProducer)
         else:
             directlyProvides(self, IPullProducer)
+        self._deliveryProto = None
 
     def pauseProducing(self):
         if not self._isPush:
@@ -227,6 +236,10 @@ class _AMPProducer(object):
         if more:
             self.resumeProducing()
 
+    def _connectionLost(self, reason):
+        if self._deliveryProto is not None:
+            self._deliveryProto.connectionLost(reason)
+
     def registerConsumer(self, consumer):
         self._consumer = consumer
         self._consumer.registerProducer(self, self._isPush)
@@ -239,6 +252,7 @@ class _AMPProducer(object):
         if not self._isPush:
             raise ValueError('only push producers can be delivered')
         self.registerConsumer(_ProtocolToConsumer(protocol))
+        self._deliveryProto = protocol
 
 
 class TransferDone(Exception):
