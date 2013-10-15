@@ -9,7 +9,7 @@ from twisted.trial import unittest
 from twisted.web.client import FileBodyProducer
 from zope.interface import implementer
 
-from txampproducer import ProducerAMP, SendProducer, deliverContent
+from txampproducer import ProducerAMP, ProducerStarter, SendProducer, deliverContent
 
 
 class TestAMP(ProducerAMP):
@@ -97,10 +97,10 @@ class ProducerAMPIntegrationTests(unittest.TestCase):
         fileToSend = StringIO(fileData)
         clock = Clock()
         consumer = FileConsumer(clock)
+        @ProducerStarter
         def registerWithConsumer(consumer):
             producer = FileSender()
             producer.beginFileTransfer(fileToSend, consumer)
-            return producer
         self.client.callRemote(SendProducer, producer=registerWithConsumer)
         self.pump.pump()
         self.server.producer.registerConsumer(consumer)
@@ -116,13 +116,13 @@ class ProducerAMPIntegrationTests(unittest.TestCase):
         consumer = FileConsumer()
         clock = Clock()
         cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+        @ProducerStarter
         def registerWithConsumer(consumer):
             producer = FileBodyProducer(fileToSend, cooperator=cooperator)
             d = producer.startProducing(consumer)
             d.addCallback(lambda ign: consumer.unregisterProducer())
             d.addErrback(log.err, 'error producing file body')
             consumer.registerProducer(producer, True)
-            return producer
         self.client.callRemote(SendProducer, producer=registerWithConsumer)
         self.pump.pump()
         self.server.producer.registerConsumer(consumer)
@@ -135,9 +135,9 @@ class ProducerAMPIntegrationTests(unittest.TestCase):
     def test_pausingPushProducer(self):
         consumer = FileConsumer()
         producer = PausablePushProducer()
+        @ProducerStarter
         def registerWithConsumer(consumer):
             consumer.registerProducer(producer, True)
-            return producer
         self.client.callRemote(SendProducer, producer=registerWithConsumer)
         self.pump.flush()
         self.server.producer.registerConsumer(consumer)
@@ -153,13 +153,13 @@ class ProducerAMPIntegrationTests(unittest.TestCase):
         fileToSend = StringIO(fileData)
         clock = Clock()
         cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+        @ProducerStarter
         def registerWithConsumer(consumer):
             producer = FileBodyProducer(fileToSend, cooperator=cooperator)
             d = producer.startProducing(consumer)
             d.addCallback(lambda ign: consumer.unregisterProducer())
             d.addErrback(log.err, 'error producing file body')
             consumer.registerProducer(producer, True)
-            return producer
         self.client.callRemote(SendProducer, producer=registerWithConsumer)
         self.pump.pump()
         d = deliverContent(self.server.producer)
@@ -172,22 +172,34 @@ class ProducerAMPIntegrationTests(unittest.TestCase):
         fileToSend = StringIO(fileData)
         clock = Clock()
         cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
-        self.client.sendFile(fileToSend, cooperator=cooperator)
+        d1 = self.client.sendFile(fileToSend, cooperator=cooperator)
         self.pump.pump()
-        d = deliverContent(self.server.producer)
+        self.pump.pump()
+        self.assertNoResult(d1)
+        d2 = deliverContent(self.server.producer)
 
+        clock.advance(1)
         while self.pump.pump():
             clock.advance(1)
-        self.assertEqual(self.successResultOf(d), fileData)
+        self.successResultOf(d1)
+        self.assertEqual(self.successResultOf(d2), fileData)
 
     def test_sendFileDisconnection(self):
         fileToSend = StringIO(fileData)
         clock = Clock()
         cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
-        self.client.sendFile(fileToSend, cooperator=cooperator)
+        d1 = self.client.sendFile(fileToSend, cooperator=cooperator)
+        self.assertFailure(d1, FakeDisconnectedError)
         self.pump.pump()
-        d = deliverContent(self.server.producer)
+        self.pump.pump()
+        self.assertNoResult(d1)
+        d2 = deliverContent(self.server.producer)
+        self.assertFailure(d2, FakeDisconnectedError)
         self.pump.pump()
         clock.advance(1)
-        self.server.connectionLost(failure.Failure(FakeDisconnectedError()))
-        self.failureResultOf(d, FakeDisconnectedError)
+        f = failure.Failure(FakeDisconnectedError())
+        self.client.connectionLost(f)
+        self.server.connectionLost(f)
+        self.assertEqual(len(self.flushLoggedErrors(FakeDisconnectedError)), 2)
+        self.successResultOf(d1)
+        self.successResultOf(d2)

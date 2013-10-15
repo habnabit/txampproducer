@@ -46,10 +46,11 @@ class Producer(Argument):
     def toStringProto(self, makeProducer, proto):
         id = uuid.uuid4().bytes
         consumer = _AMPConsumer(id, proto)
-        producer = makeProducer(consumer)
+        d = proto._notifyFinishSending(id)
+        makeProducer(consumer, d)
         if consumer._isPush is None:
             raise ValueError("makeProducer callable didn't register a producer")
-        proto._producers[id] = producer
+        proto._producers[id] = consumer._producer
         proto._consumers[id] = consumer
         return id + ('y' if consumer._isPush else 'n')
 
@@ -58,6 +59,21 @@ class Producer(Argument):
         producer = _AMPProducer(id, proto, isPush)
         proto._producers[id] = producer
         return producer
+
+
+class IProducerStarter(Interface):
+    pass
+
+
+@implementer(IProducerStarter)
+class ProducerStarter(object):
+    def __init__(self, registerWithConsumer):
+        self.deferred = None
+        self._registerWithConsumer = registerWithConsumer
+
+    def __call__(self, consumer, deferred):
+        self.deferred = deferred
+        self._registerWithConsumer(consumer)
 
 
 class SendProducer(Command):
@@ -75,6 +91,8 @@ class ProducerAMP(AMP):
         self._consumers = {}
         self._buffers = {}
         self._pending = {}
+        self._waitingOnCompletion = {}
+        self._draining = set()
 
     @_RequestSomeData.responder
     def _dataRequested(self, id):
@@ -89,15 +107,14 @@ class ProducerAMP(AMP):
 
     @_ProducerDone.responder
     def _producerDone(self, id):
-        producer = self._producers.pop(id)
-        producer.unregisterConsumer()
+        self._finishReceiving(id)
         return {}
 
     @_PushSomeData.responder
     def _pushedData(self, id, data, done=False):
         self._producers[id]._gotData(data, False)
         if done:
-            self._producerDone(id)
+            self._finishReceiving(id)
         return {}
 
     @_ToggleSendingData.responder
@@ -114,20 +131,37 @@ class ProducerAMP(AMP):
         if not isPush or not ret or not ret['data']:
             return
         kw = {}
-        if not ret.get('more') and id not in self._producers:
+        if not ret.get('more') and id in self._draining:
             kw['done'] = True
         d = self.callRemote(_PushSomeData, id=id, data=ret['data'], **kw)
         if ret.get('more'):
             d.addCallback(lambda ign: self._gotConsumerData(id, isPush, None))
+        elif id in self._draining:
+            self._finishSending(id)
         d.addErrback(log.err, 'error pushing data')
 
     def _lostConsumerProducer(self, id):
-        del self._producers[id]
-        del self._consumers[id]
         if id in self._buffers:
+            self._draining.add(id)
             return
         d = self.callRemote(_ProducerDone, id=id)
         d.addErrback(log.err, 'error notifying of producer completion')
+        self._finishSending(id)
+
+    def _finishSending(self, id, value=None):
+        del self._producers[id]
+        del self._consumers[id]
+        self._draining.discard(id)
+        waiting = self._waitingOnCompletion.pop(id, [])
+        for d in waiting:
+            d.callback(value)
+
+    def _finishReceiving(self, id, reason=None):
+        if reason is None:
+            reason = failure.Failure(TransferDone())
+        producer = self._producers.pop(id)
+        producer._connectionLost(reason)
+        producer.unregisterConsumer()
 
     def _pumpBuffer(self, id, deferred=None, data=None, returnContents=False):
         bufferList = self._buffers.pop(id, [])
@@ -155,26 +189,34 @@ class ProducerAMP(AMP):
     def _toggleSendingData(self, id, keepGoing):
         return self.callRemote(_ToggleSendingData, id=id, keepGoing=keepGoing)
 
+    def _notifyFinishSending(self, id):
+        d = defer.Deferred()
+        self._waitingOnCompletion.setdefault(id, []).append(d)
+        return d
+
     def sendFile(self, fobj, name=None, cooperator=None):
         kw = {}
         if cooperator is not None:
             kw['cooperator'] = cooperator
+        @ProducerStarter
         def registerWithConsumer(consumer):
             producer = FileBodyProducer(fobj, **kw)
             d = producer.startProducing(consumer)
             d.addCallback(lambda ign: consumer.unregisterProducer())
             d.addErrback(log.err, 'error producing file body')
             consumer.registerProducer(producer, True)
-            return producer
-        self.callRemote(SendProducer, producer=registerWithConsumer, name=name)
+        d = self.callRemote(SendProducer, producer=registerWithConsumer, name=name)
+        d.addCallback(lambda ign: registerWithConsumer.deferred)
+        return d
 
     def connectionLost(self, reason):
-        consumers, producers = self._consumers, self._producers
-        self._consumers = self._producers = None
-        for id, producer in producers.iteritems():
-            consumer = consumers.get(id)
+        for id, producer in self._producers.items():
+            consumer = self._consumers.get(id)
             if consumer is None:
-                producer._connectionLost(reason)
+                self._finishReceiving(id, reason)
+            else:
+                self._finishSending(id, reason)
+        AMP.connectionLost(self, reason)
 
 
 @implementer(IConsumer)
@@ -273,7 +315,6 @@ class _ProtocolToConsumer(object):
 
     def unregisterProducer(self):
         self._producer = None
-        self._proto.connectionLost(failure.Failure(TransferDone()))
 
     def write(self, data):
         self._proto.dataReceived(data)
