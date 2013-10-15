@@ -8,7 +8,7 @@ from twisted.test.testutils import returnConnected
 from twisted.web.client import FileBodyProducer
 from zope.interface import implementer
 
-from txampproducer import ProducerAMP, SendProducer
+from txampproducer import ProducerAMP, SendProducer, deliverContent
 
 
 class TestAMP(ProducerAMP):
@@ -148,3 +148,29 @@ def test_pausingPushProducer():
     server.producer.resumeProducing()
     pump.flush()
     assert not producer.paused
+
+
+def test_deliverContent():
+    client = TestAMP()
+    server = TestAMP()
+    pump = returnConnected(server, client)
+    fileToSend = StringIO(fileData)
+    clock = Clock()
+    cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+    def registerWithConsumer(consumer):
+        producer = FileBodyProducer(fileToSend, cooperator=cooperator)
+        d = producer.startProducing(consumer)
+        d.addCallback(lambda ign: consumer.unregisterProducer())
+        d.addErrback(log.err, 'error producing file body')
+        consumer.registerProducer(producer, True)
+        return producer
+    client.callRemote(SendProducer, producer=registerWithConsumer)
+    pump.pump()
+    d = deliverContent(server.producer)
+    body = []
+    d.addCallback(body.append)
+
+    while pump.pump():
+        clock.advance(1)
+    assert len(body[0]) == len(fileData)
+    assert body[0] == fileData

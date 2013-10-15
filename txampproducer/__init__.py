@@ -1,10 +1,10 @@
 import uuid
 
-from twisted.internet.interfaces import IConsumer
-from twisted.internet import defer
+from twisted.internet.interfaces import IConsumer, IProducer, IPushProducer, IPullProducer
+from twisted.internet import defer, protocol
 from twisted.protocols.amp import AMP, Argument, Boolean, Command, String
-from twisted.python import log
-from zope.interface import implementer
+from twisted.python import failure, log
+from zope.interface import directlyProvides, implementer, Interface
 
 
 class _RequestSomeData(Command):
@@ -173,12 +173,22 @@ class _AMPConsumer(object):
         self._proto._gotConsumerData(self._id, self._isPush, data)
 
 
+class IAMPProducer(Interface):
+    pass
+
+
+@implementer(IProducer)
+@implementer(IAMPProducer)
 class _AMPProducer(object):
     def __init__(self, id, proto, isPush):
         self._id = id
         self._proto = proto
         self._isPush = isPush
         self._lock = defer.DeferredLock()
+        if self._isPush:
+            directlyProvides(self, IPushProducer)
+        else:
+            directlyProvides(self, IPullProducer)
 
     def pauseProducing(self):
         if not self._isPush:
@@ -207,3 +217,54 @@ class _AMPProducer(object):
     def unregisterConsumer(self):
         self._consumer.unregisterProducer()
         self._consumer = None
+
+    def deliverAsProtocol(self, protocol):
+        if not self._isPush:
+            raise ValueError('only push producers can be delivered')
+        self.registerConsumer(_ProtocolToConsumer(protocol))
+
+
+class TransferDone(Exception):
+    pass
+
+
+@implementer(IConsumer)
+class _ProtocolToConsumer(object):
+    _producer = None
+
+    def __init__(self, proto):
+        self._proto = proto
+
+    def registerProducer(self, producer, isPush):
+        if not isPush:
+            raise ValueError('only push producers can be delivered')
+        self._producer = producer
+
+    def unregisterProducer(self):
+        self._producer = None
+        self._proto.connectionLost(failure.Failure(TransferDone()))
+
+    def write(self, data):
+        self._proto.dataReceived(data)
+
+
+class _AccretionProtocol(protocol.Protocol):
+    def __init__(self):
+        self._deferred = defer.Deferred()
+        self._buffer = []
+
+    def dataReceived(self, data):
+        self._buffer.append(data)
+
+    def connectionLost(self, reason):
+        if reason.check(TransferDone):
+            self._deferred.callback(''.join(self._buffer))
+            self._buffer = None
+        else:
+            self._deferred.errback(reason)
+
+
+def deliverContent(producer):
+    proto = _AccretionProtocol()
+    producer.deliverAsProtocol(proto)
+    return proto._deferred
