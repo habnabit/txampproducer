@@ -1,15 +1,13 @@
-import uuid
-
 from twisted.internet.interfaces import IConsumer, IProducer, IPushProducer, IPullProducer
 from twisted.internet import defer, protocol
-from twisted.protocols.amp import AMP, Argument, Boolean, Command, String
+from twisted.protocols.amp import AMP, Argument, Boolean, Command, Integer, String
 from twisted.python import failure, log
 from twisted.web.client import FileBodyProducer
 from zope.interface import directlyProvides, implementer, Interface
 
 
 class _RequestSomeData(Command):
-    arguments = [('id', String())]
+    arguments = [('id', Integer())]
     response = [
         ('data', String()),
         ('more', Boolean(optional=True)),
@@ -18,7 +16,7 @@ class _RequestSomeData(Command):
 
 class _PushSomeData(Command):
     arguments = [
-        ('id', String()),
+        ('id', Integer()),
         ('data', String()),
         ('done', Boolean(optional=True)),
     ]
@@ -27,14 +25,14 @@ class _PushSomeData(Command):
 
 class _ToggleSendingData(Command):
     arguments = [
-        ('id', String()),
+        ('id', Integer()),
         ('keepGoing', Boolean()),
     ]
     response = []
 
 
 class _ProducerDone(Command):
-    arguments = [('id', String())]
+    arguments = [('id', Integer())]
     response = []
 
 
@@ -44,7 +42,7 @@ class Producer(Argument):
         self.maxStringPartSize = maxStringPartSize
 
     def toStringProto(self, makeProducer, proto):
-        id = uuid.uuid4().bytes
+        id = proto._generateProducerID()
         consumer = _AMPConsumer(id, proto)
         d = proto._notifyFinishSending(id)
         makeProducer(consumer, d)
@@ -52,10 +50,11 @@ class Producer(Argument):
             raise ValueError("makeProducer callable didn't register a producer")
         proto._producers[id] = consumer._producer
         proto._consumers[id] = consumer
-        return id + ('y' if consumer._isPush else 'n')
+        return str(id) + ('y' if consumer._isPush else 'n')
 
     def fromStringProto(self, id, proto):
         id, isPush = id[:-1], id[-1] == 'y'
+        id = int(id)
         producer = _AMPProducer(id, proto, isPush)
         proto._producers[id] = producer
         return producer
@@ -85,6 +84,8 @@ class SendProducer(Command):
 
 
 class ProducerAMP(AMP):
+    _nextProducerID = 0
+
     def __init__(self, *a, **kw):
         AMP.__init__(self, *a, **kw)
         self._producers = {}
@@ -93,6 +94,10 @@ class ProducerAMP(AMP):
         self._pending = {}
         self._waitingOnCompletion = {}
         self._draining = set()
+
+    def _generateProducerID(self):
+        self._nextProducerID += 1
+        return self._nextProducerID
 
     @_RequestSomeData.responder
     def _dataRequested(self, id):
