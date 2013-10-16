@@ -2,6 +2,7 @@ from StringIO import StringIO
 
 from twisted.internet.interfaces import IConsumer, IPushProducer
 from twisted.internet.task import Clock, Cooperator, LoopingCall
+from twisted.protocols.amp import Command
 from twisted.protocols.basic import FileSender
 from twisted.python import failure, log
 from twisted.test.testutils import returnConnected
@@ -9,7 +10,14 @@ from twisted.trial import unittest
 from twisted.web.client import FileBodyProducer
 from zope.interface import implementer
 
-from txampproducer import ProducerAMP, ProducerStarter, SendProducer, deliverContent
+from txampproducer import Producer, ProducerAMP, ProducerStarter, SendProducer, deliverContent
+
+
+class ReceiveProducer(Command):
+    arguments = []
+    response = [
+        ('producer', Producer()),
+    ]
 
 
 class TestAMP(ProducerAMP):
@@ -18,6 +26,10 @@ class TestAMP(ProducerAMP):
         self.producer = producer
         self.fileName = name
         return {}
+
+    @ReceiveProducer.responder
+    def sendProducer(self):
+        return {'producer': self.registerWithConsumer}
 
 
 @implementer(IConsumer)
@@ -127,6 +139,30 @@ class ProducerAMPIntegrationTests(unittest.TestCase):
         self.pump.pump()
         self.server.producer.registerConsumer(consumer)
 
+        while self.pump.pump():
+            clock.advance(1)
+        self.assertEqual(consumer.value(), fileData)
+        self.assertIdentical(consumer._producer, None)
+
+    def test_receivePushProducer(self):
+        fileToSend = StringIO(fileData)
+        consumer = FileConsumer()
+        clock = Clock()
+        cooperator = Cooperator(scheduler=lambda f: clock.callLater(0.1, f))
+        @ProducerStarter
+        def registerWithConsumer(consumer):
+            producer = FileBodyProducer(fileToSend, cooperator=cooperator)
+            d = producer.startProducing(consumer)
+            d.addCallback(lambda ign: consumer.unregisterProducer())
+            d.addErrback(log.err, 'error producing file body')
+            consumer.registerProducer(producer, True)
+        self.server.registerWithConsumer = registerWithConsumer
+        d = self.client.callRemote(ReceiveProducer)
+        self.pump.flush()
+        receivedProducer = self.successResultOf(d)['producer']
+        receivedProducer.registerConsumer(consumer)
+
+        clock.advance(1)
         while self.pump.pump():
             clock.advance(1)
         self.assertEqual(consumer.value(), fileData)
