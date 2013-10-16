@@ -1,0 +1,4 @@
+- Accept push producers only.
+- Deferred cancellation.
+- Counts instead of UUIDs.
+- Backpressure from the underlying transport.
